@@ -182,7 +182,7 @@ export interface WaterMaterialParams {
 
 export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   // ── Gerstner Wave uniforms ─────────────────────────────────────────────────
-  const uGerstnerWaveA = uniform(vec4(1.0, 0.2, 0.12, 3.5)); // Fits ~3 times in 10m
+  const uGerstnerWaveA = uniform(vec4(1.0, 0.2, 0.45, 3.5)); // Fits ~3 times in 10m
   const uGerstnerWaveB = uniform(vec4(0.3, 1.0, 0.1, 5.0)); // Fits 2 times
   const uGerstnerWaveC = uniform(vec4(-0.8, -0.3, 0.08, 7.5));
   const uGerstnerWaveD = uniform(vec4(0.4, -0.7, 0.06, 10.0));
@@ -296,8 +296,13 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   const uSSSPower = uniform(8.0); // Sharper scattering lobe
   const uSSSDistortion = uniform(0.3); // Diffusion factor
   const uSSSThicknessScale = uniform(6.0); // Faster attenuation in volume
-  const uFoamThreshold = uniform(0.4);
+  const uFoamThreshold = uniform(0.15);
   const uFoamColor = uniform(color("#e8f4f8"));
+  const uFoamTilingA = uniform(0.5);
+  const uFoamTilingB = uniform(0.5);
+  const uEnableFoamTextureA = uniform(1.0);
+  const uEnableFoamTextureB = uniform(1.0);
+  const uEnableFoamNoise = uniform(1.0);
 
   // Sun direction (world space, non-normalized — GUI controls azimuth/elevation)
   const uSunDirection = uniform(vec3(1.0, 0.8, 1.0));
@@ -1018,45 +1023,36 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   const detJ_frag = jacobianVarying;
   const foamThreshold = uFoamThreshold;
   
-  // 1. Dual-Scale Tiling Killer: Use two foam layers at different scales and a 45° rotation offset.
-  // This prevents the layers from ever aligning and forming a visible grid.
-  const foamUV_A = surfaceUV.mul(0.12).add(vec2(uTime.mul(0.015)));
-  const f1 = texture(params.foamMap as THREE.Texture, foamUV_A).r;
+  // 1. Unified Tiling Killer: We use two samples but blend them using a soft "Max-Min" 
+  // technique rather than simple multiplication. This breaks up the grid structure.
+  const foamUV_A = surfaceUV.mul(uFoamTilingA).add(vec2(uTime.mul(0.01)));
+  const f1 = texture(params.foamMap as THREE.Texture, foamUV_A).r.mul(uEnableFoamTextureA);
   
-  const angle = 0.785; // 45 degrees
-  const s_rot = Math.sin(angle);
-  const c_rot = Math.cos(angle);
-  const rotatedUV = vec2(
-    surfaceUV.x.mul(c_rot).sub(surfaceUV.y.mul(s_rot)),
-    surfaceUV.x.mul(s_rot).add(surfaceUV.y.mul(c_rot))
-  );
-  const foamUV_B = rotatedUV.mul(0.19).sub(vec2(uTime.mul(0.02)));
-  const f2 = texture(params.foamMap as THREE.Texture, foamUV_B).r;
+  const foamUV_B = surfaceUV.mul(uFoamTilingB).sub(vec2(uTime.mul(0.015), uTime.mul(0.01)));
+  const f2 = texture(params.foamMap as THREE.Texture, foamUV_B).r.mul(uEnableFoamTextureB);
   
-  const combinedTex = f1.mul(f2).mul(1.5).add(f1.mul(0.2));
+  // Soft Max blend creates an interlocking, organic structure.
+  // We use mix to gracefully handle disabling one of the textures for debugging.
+  const maxMinBlend = f1.max(f2).mul(f1.add(f2).mul(0.5));
+  const singleLayer = f1.add(f2);
+  const combinedTex = uEnableFoamTextureA.add(uEnableFoamTextureB).greaterThan(1.5).select(maxMinBlend, singleLayer);
 
-  // 2. Macro-Clumping & Noise Detail: 
-  // We use multiple octaves of noise to add organic variety to the foam density
-  // and break up the texture pattern.
-  const noiseUV = surfaceUV.mul(0.4).add(vec2(uTime.mul(0.02)));
-  const fbmNoise = noise2D(noiseUV).mul(0.5)
-    .add(noise2D(noiseUV.mul(2.03)).mul(0.25))
-    .add(noise2D(noiseUV.mul(4.07)).mul(0.125));
+  // 2. Macro-Clumping & Fractal Noise:
+  const noiseUV = surfaceUV.mul(0.31).add(vec2(uTime.mul(0.02)));
+  const rawNoise = noise2D(noiseUV).mul(0.5)
+    .add(noise2D(noiseUV.mul(2.17)).mul(0.25))
+    .add(noise2D(noiseUV.mul(4.31)).mul(0.125));
+  const fbmNoise = rawNoise.mul(uEnableFoamNoise);
 
-  // Organic Edge Erosion: 
-  // Jitter the Jacobian determinant with BOTH the texture and the procedural noise.
-  // This makes the foam break up into bubbly filaments and "lacy" structures.
-  const organicDetJ = detJ_frag
-    .sub(combinedTex.mul(0.15))
-    .sub(fbmNoise.mul(0.2));
+  // 3. Unified Organic Edge Erosion: 
+  const detailMask = mix(combinedTex, fbmNoise, 0.6);
+  const organicDetJ = detJ_frag.sub(detailMask.mul(0.4));
   
-  // 4. Two-Stage Masking for soft transitions
-  const denseMask = smoothstep(foamThreshold.add(0.1), foamThreshold, organicDetJ);
-  const thinMask = smoothstep(foamThreshold.add(0.4), foamThreshold, organicDetJ).mul(0.3);
-  
-  // Mix texture and noise: The noise creates the large-scale "clumps" while 
-  // the texture provides the high-frequency "bubbles".
-  const finalMask = denseMask.max(thinMask).mul(mix(combinedTex, fbmNoise, 0.4));
+  // 4. Unified Masking:
+  // We use a non-linear remap to make the foam feel "bubbly" rather than flat.
+  const edgeMask = smoothstep(foamThreshold.add(0.4), foamThreshold, organicDetJ);
+  const bubblyMask = edgeMask.pow(1.5).mul(detailMask);
+  const finalMask = bubblyMask.mul(1.2).clamp(0.0, 1.0);
   
   const foamVisibility = finalMask.mul(uEnableFoam).mul(isTop);
 
@@ -1097,6 +1093,11 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
       uSSSThicknessScale,
       uFoamThreshold,
       uFoamColor,
+      uFoamTilingA,
+      uFoamTilingB,
+      uEnableFoamTextureA,
+      uEnableFoamTextureB,
+      uEnableFoamNoise,
       uEnableSSS,
       uEnableFoam,
       uEnableWaves,

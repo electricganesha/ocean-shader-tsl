@@ -341,6 +341,13 @@ foamFolder.add(debugObject, "enableFoam").name("Enable").onChange((v: boolean) =
 foamFolder.add(waterNodeData.uniforms.uFoamThreshold, "value", 0, 2, 0.01).name("Break Threshold");
 foamFolder.addColor({ color: "#e8f4f8" }, "color").name("Color").onChange((v: string) => waterNodeData.uniforms.uFoamColor.value.set(v));
 
+const foamDebugFolder = foamFolder.addFolder("Foam Debug & Tiling");
+foamDebugFolder.add({ val: true }, "val").name("Enable Texture A").onChange((v: boolean) => waterNodeData.uniforms.uEnableFoamTextureA.value = v ? 1.0 : 0.0);
+foamDebugFolder.add({ val: true }, "val").name("Enable Texture B").onChange((v: boolean) => waterNodeData.uniforms.uEnableFoamTextureB.value = v ? 1.0 : 0.0);
+foamDebugFolder.add({ val: true }, "val").name("Enable Noise").onChange((v: boolean) => waterNodeData.uniforms.uEnableFoamNoise.value = v ? 1.0 : 0.0);
+foamDebugFolder.add(waterNodeData.uniforms.uFoamTilingA, "value", 0.01, 1.0, 0.001).name("Tiling A");
+foamDebugFolder.add(waterNodeData.uniforms.uFoamTilingB, "value", 0.01, 1.0, 0.001).name("Tiling B");
+
 const causticsFolder = featuresFolder.addFolder("Analytic Caustics");
 causticsFolder.add(waterNodeData.uniforms.uEnableCaustics, "value", 0, 1, 1).name("Enable");
 causticsFolder.add(waterNodeData.uniforms.uCausticsStrength, "value", 0, 5, 0.05).name("Strength");
