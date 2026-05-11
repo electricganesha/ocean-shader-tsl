@@ -63,6 +63,7 @@ import {
   ceil,
   log2,
   Return,
+  Loop,
 } from "three/tsl";
 
 /**
@@ -221,6 +222,7 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   let jacobianVarying: any;
   let normalVarianceVarying: any;
   let waveHeightVarying: any;
+  let undisplacedUVVarying: any;
 
   // -------------------------------------------------------------------------
   // 1. IFFT Wave Sampling (from JONSWAP compute cascades)
@@ -229,36 +231,37 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   // Using positionWorld.xz directly maps world coords into the simulation grid.
   const gridSize = float(params.gridSize || 256);
   const L_sim = float(params.simulationL || 25.0); // simulation domain in metres
-  const uvCoord = positionWorld.xz.div(L_sim).add(0.5).fract();
+  const undisplacedUV = positionWorld.xz.div(L_sim).add(0.5).fract();
+  undisplacedUVVarying = varying(undisplacedUV);
+
+  const uvCoord = undisplacedUV;
 
   /**
    * Bilinear sampling for Storage Buffers
-   * Smoothes out the 256x256 simulation grid on the 512x512 mesh to avoid "blocky" squares.
+   * Optimized version
    */
-  const bilinearSample = Fn(([buffer]: [any]) => {
-    const scaledUV = uvCoord.mul(gridSize);
+  const bilinearSample = Fn(([buffer, uv]: [any, any]) => {
+    const scaledUV = uv.mul(gridSize);
     const i00 = scaledUV.sub(0.5).floor();
     const f = scaledUV.sub(0.5).fract();
 
-    const sample = (x: any, y: any) => {
-      const gx = x.add(gridSize).mod(gridSize);
-      const gy = y.add(gridSize).mod(gridSize);
-      const idx = int(gy.mul(gridSize).add(gx));
-      return buffer.element(idx);
-    };
+    const gx0 = i00.x.add(gridSize).mod(gridSize);
+    const gx1 = i00.x.add(1).add(gridSize).mod(gridSize);
+    const gy0 = i00.y.add(gridSize).mod(gridSize);
+    const gy1 = i00.y.add(1).add(gridSize).mod(gridSize);
 
-    const v00 = sample(i00.x, i00.y);
-    const v10 = sample(i00.x.add(1), i00.y);
-    const v01 = sample(i00.x, i00.y.add(1));
-    const v11 = sample(i00.x.add(1), i00.y.add(1));
+    const v00 = buffer.element(int(gy0.mul(gridSize).add(gx0)));
+    const v10 = buffer.element(int(gy0.mul(gridSize).add(gx1)));
+    const v01 = buffer.element(int(gy1.mul(gridSize).add(gx0)));
+    const v11 = buffer.element(int(gy1.mul(gridSize).add(gx1)));
 
     return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
   });
 
   // Vertical and Horizontal Displacements. Scale up to be visible at diorama scale.
   const ifftScale = float(params.simulationL ? params.simulationL / 12.0 : 2.0);
-  const v1Sample = params.vDisp1 ? bilinearSample(params.vDisp1) : vec4(0);
-  const h1Sample = params.hDisp1 ? bilinearSample(params.hDisp1) : vec4(0);
+  const v1Sample = params.vDisp1 ? bilinearSample(params.vDisp1, uvCoord) : vec4(0);
+  const h1Sample = params.hDisp1 ? bilinearSample(params.hDisp1, uvCoord) : vec4(0);
 
   const vIFFT = v1Sample.x.mul(ifftScale);
   const hIFFT = vec2(h1Sample.x, h1Sample.z).mul(ifftScale);
@@ -266,8 +269,8 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   const ifftOffset = vec3(hIFFT.x, vIFFT, hIFFT.y);
 
   // Jacobian & Slopes (for foam and normals)
-  const j1 = params.j1 ? bilinearSample(params.j1).xz : vec2(0);
-  const j2 = params.j2 ? bilinearSample(params.j2).xz : vec2(0);
+  const j1 = params.j1 ? bilinearSample(params.j1, uvCoord).xz : vec2(0);
+  const j2 = params.j2 ? bilinearSample(params.j2, uvCoord).xz : vec2(0);
 
   // Choppiness: scales horizontal displacement (lambda in Tessendorf paper)
   const uChoppiness = uniform(1.2);
@@ -278,7 +281,7 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   const dDzdz_ifft = j2.y.mul(uChoppiness);
 
   const vSlopeSample = params.vSlopeX
-    ? bilinearSample(params.vSlopeX)
+    ? bilinearSample(params.vSlopeX, uvCoord)
     : vec4(0);
   const dHdx_ifft = vSlopeSample.x;
   const dHdz_ifft = vSlopeSample.z;
@@ -303,6 +306,7 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   const uSunColor = uniform(color("#fff5e0"));
   const uSunSpecularPower = uniform(1500.0); // Sharper glint for sun disk
   const uSunSpecularStrength = uniform(30.0); // More balanced glint
+  const uResolution = uniform(vec2(1, 1));
 
   const uEnableSSS = uniform(1.0);
   const uEnableFoam = uniform(1.0);
@@ -691,6 +695,44 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   const V = normalizeNode(cameraPosition.sub(positionWorld));
   const L = normalizeNode(uSunDirection);
 
+  // ── Wave Height Function (for Volumetrics) ────────────────────────────────
+  const getWaveHeightAt = Fn(([xz]: [any]) => {
+    // For ray-marching steps, we approximate the height.
+    // However, for the very start of the ray, we want it to match perfectly.
+    const uv = xz.div(L_sim).add(0.5).fract();
+    const v = params.vDisp1 ? bilinearSample(params.vDisp1, uv).x.mul(ifftScale) : float(0);
+
+    const kA = mul(2.0, 3.14159).div(uGerstnerWaveA.w);
+    const cA = sqrt(div(9.81, kA));
+    const dA = normalizeNode(uGerstnerWaveA.xy);
+    const fA = kA.mul(dot(dA, xz).sub(cA.mul(uTime)));
+    const yA = uGerstnerWaveA.z.div(kA).mul(sin(fA));
+
+    const kB = mul(2.0, 3.14159).div(uGerstnerWaveB.w);
+    const cB = sqrt(div(9.81, kB));
+    const dB = normalizeNode(uGerstnerWaveB.xy);
+    const fB = kB.mul(dot(dB, xz).sub(cB.mul(uTime)));
+    const yB = uGerstnerWaveB.z.div(kB).mul(sin(fB));
+
+    const kC = mul(2.0, 3.14159).div(uGerstnerWaveC.w);
+    const cC = sqrt(div(9.81, kC));
+    const dC = normalizeNode(uGerstnerWaveC.xy);
+    const fC = kC.mul(dot(dC, xz).sub(cC.mul(uTime)));
+    const yC = uGerstnerWaveC.z.div(kC).mul(sin(fC));
+
+    const kD = mul(2.0, 3.14159).div(uGerstnerWaveD.w);
+    const cD = sqrt(div(9.81, kD));
+    const dD = normalizeNode(uGerstnerWaveD.xy);
+    const fD = kD.mul(dot(dD, xz).sub(cD.mul(uTime)));
+    const yD = uGerstnerWaveD.z.div(kD).mul(sin(fD));
+
+    return yA.add(yB).add(yC).add(yD).add(v).add(1.0);
+  });
+
+  const uFogDensity = uniform(1.5);
+  const uVolumeAO = uniform(1.2);
+  const uEnableVolumetricFog = uniform(1.0);
+
   // ── Skybox (Reflection) ──────────────────────────────────────────────────
   const reflectDir = reflect(V.negate(), shadingNormal);
   const envReflection = cubeTexture(
@@ -749,6 +791,11 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
     const isSkybox = step(depthSample, float(0.001)).add(step(float(0.999), depthSample));
     return isSkybox.greaterThan(0.0).select(cameraFar, viewZ.negate());
   });
+  // Total spectral absorption: α_total(λ) = αw + αp·Chl + α_NAP·NAP + α_CDOM·aCDOM
+  const alphaTotal = uAbsWater
+    .add(uAbsPhyto.mul(uChl))
+    .add(uAbsNAP.mul(uNAP))
+    .add(uAbsCDOM.mul(uaCDOM));
 
   // 1. Calculate actual vertical depth using the depth buffer
   const sceneDepthNonLinear = viewportDepthTexture(viewportUV).r;
@@ -759,22 +806,71 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   const worldUp = vec3(0, 1, 0);
   const cosView = dot(V, worldUp).abs().clamp(0.01, 1.0);
   const verticalDepth = sceneDepthLinear.sub(surfaceDepthLinear).max(0.0).mul(uDepthScale);
-  const pathLength = verticalDepth.div(cosView);
+  
+  // Calculate end position for the ray march (approximate point on the floor)
+  // We ray-march along the refraction vector for physical accuracy
+  const R = refract(V.negate(), shadingNormal, eta);
+  const hasRefraction = dot(R, R).greaterThan(0.0);
+  const rayDir = hasRefraction.select(R, V.negate());
+  
+  // Dist to floor along rayDir: d = verticalDepth / cos(theta)
+  // where theta is angle to vertical. cos(theta) = rayDir.y.abs()
+  const pathLength = verticalDepth.div(rayDir.y.abs().max(0.01));
+  const endPos = positionWorld.add(rayDir.mul(pathLength));
 
-  // Total spectral absorption: α_total(λ) = αw + αp·Chl + α_NAP·NAP + α_CDOM·aCDOM
-  const alphaTotal = uAbsWater
-    .add(uAbsPhyto.mul(uChl))
-    .add(uAbsNAP.mul(uNAP))
-    .add(uAbsCDOM.mul(uaCDOM));
+  // ── Ray-Marched Volumetric Absorption ────────────────────────────────────
+  const volumetricResult = Fn(() => {
+    // Optimization: Reduce step count from 12 to 8.
+    // We use a dithered offset to hide banding, which is much cheaper than more steps.
+    const stepCount = int(8);
+    const accumColor = vec3(0).toVar();
+    const currentTransmittance = vec3(1.0).toVar();
 
-  // Beer-Lambert transmittance: T(λ) = exp(-α(λ) · pathLength)
-  const transmittance = exp(alphaTotal.negate().mul(pathLength));
+    const marchRay = endPos.sub(positionWorld);
+    const totalDist = marchRay.length();
+    const stepSize = totalDist.div(float(stepCount));
+    const stepDir = marchRay.normalize().mul(stepSize);
 
-  // Backscatter: luminous curtain integrated along view path
-  const backscatterContrib = uBackscatter.mul(float(1.0).sub(transmittance));
+    // Dither the start position to break up banding artifacts.
+    // Standard 2x2 Bayer-like pattern using screen coordinates.
+    const dither = fract(dot(viewportUV, uResolution.mul(0.75))).mul(stepSize);
+    const p = positionWorld.add(marchRay.normalize().mul(dither)).toVar();
 
-  // apply volumetric tinting to the background (I = I0 * exp(-alpha * d))
-  const oceanColor = mix(uSurfaceColor.xyz, background, transmittance).add(backscatterContrib);
+    Loop({ start: int(0), end: stepCount }, () => {
+      const h = getWaveHeightAt(p.xz);
+      const isBelow = p.y.lessThan(h.add(0.01)); 
+
+      const depthAtP = h.sub(p.y).max(0.0);
+      const ao = exp(depthAtP.mul(uVolumeAO.negate()));
+
+      const alpha = isBelow.select(alphaTotal.mul(uDepthScale), vec3(0));
+      const stepTransmittance = exp(alpha.negate().mul(stepSize));
+      const stepFog = isBelow.select(uBackscatter.mul(float(1.0).sub(stepTransmittance)).mul(ao).mul(uFogDensity), vec3(0));
+
+      accumColor.addAssign(stepFog.mul(currentTransmittance));
+      currentTransmittance.mulAssign(stepTransmittance);
+      p.addAssign(stepDir);
+    });
+
+    const marchColor = mix(uSurfaceColor.xyz, background, currentTransmittance).add(accumColor);
+    const marchAvgT = currentTransmittance.r.add(currentTransmittance.g).add(currentTransmittance.b).div(3.0);
+
+    // Fallback to simple Beer-Lambert if volumetric is disabled
+    const simpleAlpha = alphaTotal.mul(uDepthScale);
+    const simpleT = exp(simpleAlpha.negate().mul(pathLength));
+    const simpleFog = uBackscatter.mul(float(1.0).sub(simpleT));
+    const simpleColor = mix(uSurfaceColor.xyz, background, simpleT).add(simpleFog);
+    const simpleAvgT = simpleT.r.add(simpleT.g).add(simpleT.b).div(3.0);
+
+    return uEnableVolumetricFog.greaterThan(0.5).select(
+        vec4(marchColor, marchAvgT),
+        vec4(simpleColor, simpleAvgT)
+    );
+  })();
+
+
+  const oceanColor = volumetricResult.rgb;
+  const avgTransmittance = volumetricResult.a;
 
   // ── Frostbite 2 Subsurface Scattering ────────────────────────────────────
   // Barré-Brisebois/Bouchard: I_sss = max(0, V · (-L + N_dist))^p
@@ -845,7 +941,6 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
   // Depth attenuation — reuse Beer-Lambert transmittance (already computed).
   // We use the square of the average transmittance to make caustics fade 
   // faster than the general water tint, preventing "milky" volume artifacts.
-  const avgTransmittance = transmittance.r.add(transmittance.g).add(transmittance.b).div(3.0);
   const causticsDepthAtten = avgTransmittance.pow(2.0);
 
   // Skybox Mask: Only apply caustics if we hit a floor/object (depth < 0.999).
@@ -1008,6 +1103,9 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
       uIOR,
       uRefrStrength,
       uDispersion,
+      uFogDensity,
+      uVolumeAO,
+      uEnableVolumetricFog,
       uCausticsStrength,
       uCausticsSharpness,
       uCausticsColor,
@@ -1019,6 +1117,7 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
       uSunColor,
       uSunSpecularPower,
       uSunSpecularStrength,
+      uResolution,
     },
   };
 };

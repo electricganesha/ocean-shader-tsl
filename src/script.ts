@@ -149,12 +149,14 @@ const waterNodeData = WaterNodeMaterial({
   simulationL: baseL, // Must match baseL — keeps UV wrapping in sync with simulation domain
 } as WaterMaterialParams);
 
+waterNodeData.uniforms.uResolution.value.set(sizes.width, sizes.height);
+
 const waterMaterial = new MeshBasicNodeMaterial();
 waterMaterial.positionNode = waterNodeData.positionNode;
 waterMaterial.colorNode = waterNodeData.colorNode;
 waterMaterial.transparent = waterNodeData.transparent;
 waterMaterial.opacityNode = waterNodeData.opacity;
-waterMaterial.side = THREE.DoubleSide;
+waterMaterial.side = THREE.FrontSide;
 
 const water = new THREE.Mesh(waterGeometry, waterMaterial);
 // Must render AFTER the environment so viewportSharedTexture has scene content
@@ -323,6 +325,9 @@ opticsFolder.add(waterNodeData.uniforms.uIOR, "value", 1.0, 1.5, 0.001).name("IO
 opticsFolder.add(waterNodeData.uniforms.uRefrStrength, "value", 0, 0.1, 0.001).name("Refraction Distortion");
 opticsFolder.add(waterNodeData.uniforms.uDispersion, "value", 0, 0.02, 0.0001).name("Chromatic Dispersion");
 opticsFolder.add(waterNodeData.uniforms.uDepthScale, "value", 0.1, 50, 0.1).name("Optical Density (m)");
+opticsFolder.add(waterNodeData.uniforms.uEnableVolumetricFog, "value", 0, 1, 1).name("Enable Volumetric Fog");
+opticsFolder.add(waterNodeData.uniforms.uFogDensity, "value", 0.0, 5.0, 0.1).name("Volumetric Fog Density");
+opticsFolder.add(waterNodeData.uniforms.uVolumeAO, "value", 0.0, 5.0, 0.1).name("Wave AO Strength");
 opticsFolder.add(waterNodeData.uniforms.uOpacity, "value", 0.0, 1.0, 0.01).name("Global Opacity");
 
 const featuresFolder = gui.addFolder("Surface Features");
@@ -359,6 +364,9 @@ window.addEventListener("resize", () => {
   // Update renderer
   renderer.setSize(sizes.width, sizes.height);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+  // Update uniform
+  waterNodeData.uniforms.uResolution.value.set(sizes.width, sizes.height);
 });
 
 /**
