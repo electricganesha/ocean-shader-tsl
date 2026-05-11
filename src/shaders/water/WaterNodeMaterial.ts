@@ -836,9 +836,10 @@ export const WaterNodeMaterial = (params: WaterMaterialParams) => {
     const stepSize = totalDist.div(float(stepCount));
     const stepDir = marchRay.normalize().mul(stepSize);
 
-    // Dither the start position to break up banding artifacts.
-    // Standard 2x2 Bayer-like pattern using screen coordinates.
-    const dither = fract(dot(viewportUV, uResolution.mul(0.75))).mul(stepSize);
+    // Dither the start position to break up banding artifacts using Interleaved Gradient Noise.
+    // This is much more "organic" than the previous patterned dither and removes the "scanline" look.
+    const magic = vec3(0.06711056, 0.00583715, 52.9829189);
+    const dither = fract(magic.z.mul(fract(dot(viewportUV.mul(uResolution), magic.xy)))).mul(stepSize);
     const p = positionWorld.add(marchRay.normalize().mul(dither)).toVar();
 
     Loop({ start: int(0), end: stepCount }, () => {
