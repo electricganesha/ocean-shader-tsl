@@ -4,6 +4,8 @@ A Three.js project utilizing WebGPU, TSL (Three.js Shading Language), and comput
 
 <img width="2914" height="1762" alt="Screenshot_2023-02-02_at_10 51 59" src="https://github.com/user-attachments/assets/810fb44c-8971-41aa-a522-ae188ebbef31" />
 
+Try the [demo](https://ocean-shader.vercel.app/)
+
 ## Features
 
 - **WebGPU Powered:** Built exclusively for WebGPU utilizing `three/webgpu`.
