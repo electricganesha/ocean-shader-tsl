@@ -2,6 +2,8 @@
 
 A Three.js project utilizing WebGPU, TSL (Three.js Shading Language), and compute shaders to perform ocean simulation based on the JONSWAP spectrum and Inverse Fast Fourier Transform (IFFT).
 
+<img width="2914" height="1762" alt="Screenshot_2023-02-02_at_10 51 59" src="https://github.com/user-attachments/assets/810fb44c-8971-41aa-a522-ae188ebbef31" />
+
 ## Features
 
 - **WebGPU Powered:** Built exclusively for WebGPU utilizing `three/webgpu`.
